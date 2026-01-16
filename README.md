@@ -1,4 +1,4 @@
-# 🛡️ InfraRed
+# 🛡️ InfraRed - V2.0
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.8+-blue.svg" alt="Python">
