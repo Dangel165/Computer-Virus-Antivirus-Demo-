@@ -1,2 +1,2 @@
-# Computer-Virus-Antivirus-Demo-
+# InfraRed
 그냥 간단하게 파이썬과 C++를 결합한 데모 백신입니다 아직은 단어 필터링으로 잡아내는 구조라 진짜 간단합니다
