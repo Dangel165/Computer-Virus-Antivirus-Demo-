@@ -25,24 +25,54 @@ from watchdog.events import FileSystemEventHandler
 # ============================================================================
 # 전역 설정
 # ============================================================================
-SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "settings.json")
+# 스크립트 디렉토리를 절대 경로로 확실하게 가져오기
+if getattr(sys, 'frozen', False):
+    # PyInstaller로 빌드된 경우
+    SCRIPT_DIR = os.path.dirname(sys.executable)
+else:
+    # 일반 Python 스크립트 실행
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+SETTINGS_FILE = os.path.join(SCRIPT_DIR, "settings.json")
+print(f"[설정] 설정 파일 경로: {SETTINGS_FILE}")
 
 def load_settings():
     """설정 파일 로드"""
     default_settings = {
-        'quarantine_dir': os.path.join(os.path.dirname(__file__), "quarantine")
+        'quarantine_dir': os.path.join(SCRIPT_DIR, "quarantine"),
+        'exclusions': {
+            'folders': [],      # 제외 폴더 목록
+            'files': [],        # 제외 파일 목록
+            'extensions': [],   # 제외 확장자 목록
+            'hashes': []        # 제외 해시 목록
+        }
     }
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
                 settings = json.load(f)
+                print(f"[설정] 설정 파일 로드 성공!")
                 # 기본값과 병합
                 for key, value in default_settings.items():
                     if key not in settings:
                         settings[key] = value
+                # exclusions 하위 키도 병합
+                if 'exclusions' in settings:
+                    for key, value in default_settings['exclusions'].items():
+                        if key not in settings['exclusions']:
+                            settings['exclusions'][key] = value
+                # 로드된 제외 목록 출력
+                exc = settings.get('exclusions', {})
+                print(f"  - 제외 폴더: {len(exc.get('folders', []))}개")
+                print(f"  - 제외 파일: {len(exc.get('files', []))}개")
+                print(f"  - 제외 확장자: {len(exc.get('extensions', []))}개")
+                print(f"  - 제외 해시: {len(exc.get('hashes', []))}개")
                 return settings
-        except:
+        except Exception as e:
+            print(f"[설정] 설정 파일 로드 오류: {e}")
             return default_settings
+    else:
+        print(f"[설정] 설정 파일이 없습니다. 기본값 사용.")
     return default_settings
 
 def save_settings(settings):
@@ -50,15 +80,16 @@ def save_settings(settings):
     try:
         with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
             json.dump(settings, f, indent=2, ensure_ascii=False)
+        print(f"[설정] 설정 저장 완료: {SETTINGS_FILE}")
         return True
     except Exception as e:
-        print(f"설정 저장 오류: {e}")
+        print(f"[설정] 설정 저장 오류: {e}")
         return False
 
 # 설정 로드
 SETTINGS = load_settings()
 QUARANTINE_DIR = SETTINGS['quarantine_dir']
-HISTORY_FILE = os.path.join(os.path.dirname(__file__), "scan_history.json")
+HISTORY_FILE = os.path.join(SCRIPT_DIR, "scan_history.json")
 
 if not os.path.exists(QUARANTINE_DIR):
     os.makedirs(QUARANTINE_DIR)
@@ -66,27 +97,36 @@ if not os.path.exists(QUARANTINE_DIR):
 # ============================================================================
 # DLL 로딩
 # ============================================================================
+dll_dir = SCRIPT_DIR
 if sys.platform.startswith("win"):
-    dll_dir = os.path.dirname(os.path.abspath(__file__))
     os.environ["PATH"] = dll_dir + os.pathsep + os.environ["PATH"]
     try:
         os.add_dll_directory(dll_dir)
     except AttributeError:
         pass
-
-if sys.platform.startswith("win"):
     libname = "antivirus_core.dll"
 else:
     libname = "libantivirus_core.so"
 
+dll_path = os.path.join(dll_dir, libname)
+engine = None
+has_detailed_scan = False
+has_add_signature = False
+has_add_hash = False
+has_yara = False
+has_import_analysis = False
+has_pe_analysis = False
+has_archive_analysis = False
+
 try:
-    engine = ctypes.CDLL(os.path.join(os.path.dirname(__file__), libname))
+    if not os.path.exists(dll_path):
+        raise FileNotFoundError(f"DLL 파일을 찾을 수 없습니다: {dll_path}")
+    
+    engine = ctypes.WinDLL(dll_path) if sys.platform.startswith("win") else ctypes.CDLL(dll_path)
+    
+    # 기본 함수 설정
     engine.scan_file.argtypes = [ctypes.c_wchar_p]
     engine.scan_file.restype = ctypes.c_int
-
-    has_detailed_scan = False
-    has_add_signature = False
-    has_add_hash = False
 
     try:
         engine.scan_file_detailed.argtypes = [ctypes.c_wchar_p]
@@ -109,11 +149,57 @@ try:
     except AttributeError:
         print("[경고] add_hash 함수를 찾을 수 없습니다.")
 
+    # 새 함수들
+    try:
+        engine.add_yara_rule.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, 
+                                          ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
+        engine.add_yara_rule.restype = ctypes.c_int
+        has_yara = True
+    except AttributeError:
+        pass
+
+    try:
+        engine.analyze_imports_api.argtypes = [ctypes.c_wchar_p]
+        engine.analyze_imports_api.restype = ctypes.c_char_p
+        has_import_analysis = True
+    except AttributeError:
+        pass
+
+    try:
+        engine.analyze_pe_file.argtypes = [ctypes.c_wchar_p]
+        engine.analyze_pe_file.restype = ctypes.c_char_p
+        has_pe_analysis = True
+    except AttributeError:
+        pass
+
+    try:
+        engine.analyze_archive.argtypes = [ctypes.c_wchar_p]
+        engine.analyze_archive.restype = ctypes.c_char_p
+        has_archive_analysis = True
+    except AttributeError:
+        pass
+
+    try:
+        engine.get_engine_stats.argtypes = []
+        engine.get_engine_stats.restype = ctypes.c_char_p
+    except AttributeError:
+        pass
+
+    try:
+        engine.get_engine_version.argtypes = []
+        engine.get_engine_version.restype = ctypes.c_char_p
+    except AttributeError:
+        pass
+
     print(f"[성공] {libname} 로드 완료!")
     print(f"  - 기본 스캔: ✓")
     print(f"  - 상세 스캔: {'✓' if has_detailed_scan else '✗'}")
     print(f"  - 시그니처 추가: {'✓' if has_add_signature else '✗'}")
     print(f"  - 해시 추가: {'✓' if has_add_hash else '✗'}")
+    print(f"  - YARA 룰: {'✓' if has_yara else '✗'}")
+    print(f"  - Import 분석: {'✓' if has_import_analysis else '✗'}")
+    print(f"  - PE 분석: {'✓' if has_pe_analysis else '✗'}")
+    print(f"  - 압축파일 분석: {'✓' if has_archive_analysis else '✗'}")
 
 except Exception as e:
     print(f"\n[치명적 오류] DLL 로드 실패: {e}\n")
@@ -130,20 +216,83 @@ class ScanStats:
         self.suspicious_files = 0
         self.errors = 0
         self.quarantined = 0
+        self.skipped = 0  # 제외된 파일 수
 
     def reset(self):
         self.__init__()
 
 # ============================================================================
+# 제외 목록 확인 함수
+# ============================================================================
+def is_excluded(filepath, exclusions):
+    """파일이 제외 목록에 있는지 확인"""
+    filepath_lower = filepath.lower()
+    filename = os.path.basename(filepath)
+    ext = os.path.splitext(filepath)[1].lower()
+    
+    # 폴더 제외 확인
+    for folder in exclusions.get('folders', []):
+        folder_lower = folder.lower()
+        if filepath_lower.startswith(folder_lower) or folder_lower in filepath_lower:
+            return True, f"제외 폴더: {folder}"
+    
+    # 파일 제외 확인
+    for file in exclusions.get('files', []):
+        file_lower = file.lower()
+        if filepath_lower == file_lower or filename.lower() == os.path.basename(file_lower):
+            return True, f"제외 파일: {file}"
+    
+    # 확장자 제외 확인
+    for excluded_ext in exclusions.get('extensions', []):
+        excluded_ext_lower = excluded_ext.lower()
+        if not excluded_ext_lower.startswith('.'):
+            excluded_ext_lower = '.' + excluded_ext_lower
+        if ext == excluded_ext_lower:
+            return True, f"제외 확장자: {excluded_ext}"
+    
+    return False, ""
+
+def is_hash_excluded(md5_hash, sha256_hash, exclusions):
+    """해시가 제외 목록에 있는지 확인"""
+    for hash_entry in exclusions.get('hashes', []):
+        hash_value = hash_entry.get('hash', '').lower()
+        if hash_value:
+            if md5_hash and md5_hash.lower() == hash_value:
+                return True, f"제외 해시 (MD5): {hash_entry.get('description', hash_value)}"
+            if sha256_hash and sha256_hash.lower() == hash_value:
+                return True, f"제외 해시 (SHA256): {hash_entry.get('description', hash_value)}"
+    return False, ""
+
+# ============================================================================
 # 스캔 함수
 # ============================================================================
 def scan_file_basic(filepath):
-    result = engine.scan_file(filepath)
-    status_map = {0: "정상", 1: "악성-시그니처", 2: "악성-해시", 3: "의심-휴리스틱", -1: "오류"}
-    status_text = status_map.get(result, "알수없음")
-    return f"[{status_text}] {filepath}", result
+    """기본 스캔 - 안전한 호출"""
+    if engine is None:
+        return "[오류] DLL 로드 안됨", -1
+    if not filepath or not os.path.exists(filepath):
+        return "[오류] 파일 없음", -1
+    try:
+        # 경로를 절대 경로로 변환
+        abs_path = os.path.abspath(filepath)
+        # ctypes.create_unicode_buffer를 사용하여 안전하게 문자열 전달
+        path_buffer = ctypes.create_unicode_buffer(abs_path)
+        result = engine.scan_file(path_buffer)
+        status_map = {0: "정상", 1: "악성-시그니처", 2: "악성-해시", 3: "의심-휴리스틱", -1: "오류"}
+        status_text = status_map.get(result, "알수없음")
+        return f"[{status_text}] {filepath}", result
+    except Exception as e:
+        return f"[오류] {e}", -1
 
 def scan_file_detailed(filepath):
+    """상세 스캔 - 안전한 호출"""
+    if engine is None:
+        return {"status": -1, "threat_type": "error", "threat_name": "DLL Not Loaded",
+                "md5": "", "sha256": "", "entropy": 0.0, "file_size": 0}
+    if not filepath or not os.path.exists(filepath):
+        return {"status": -1, "threat_type": "error", "threat_name": "File Not Found",
+                "md5": "", "sha256": "", "entropy": 0.0, "file_size": 0}
+    
     if not has_detailed_scan:
         msg, code = scan_file_basic(filepath)
         return {
@@ -151,15 +300,73 @@ def scan_file_detailed(filepath):
             "md5": "", "sha256": "", "entropy": 0.0, "file_size": 0
         }
     try:
-        result_json = engine.scan_file_detailed(filepath)
-        return json.loads(result_json.decode('utf-8'))
+        abs_path = os.path.abspath(filepath)
+        # ctypes.create_unicode_buffer를 사용하여 안전하게 문자열 전달
+        path_buffer = ctypes.create_unicode_buffer(abs_path)
+        result_ptr = engine.scan_file_detailed(path_buffer)
+        if result_ptr:
+            return json.loads(result_ptr.decode('utf-8'))
+        else:
+            raise Exception("NULL 반환")
     except Exception as e:
         print(f"상세 스캔 오류: {e}")
-        msg, code = scan_file_basic(filepath)
-        return {
-            "status": code, "threat_type": "unknown", "threat_name": "Scan Error",
-            "md5": "", "sha256": "", "entropy": 0.0, "file_size": 0
-        }
+        # 기본 스캔으로 폴백
+        try:
+            msg, code = scan_file_basic(filepath)
+            return {
+                "status": code, "threat_type": "unknown", "threat_name": msg.split(']')[0].replace('[', ''),
+                "md5": "", "sha256": "", "entropy": 0.0, "file_size": 0
+            }
+        except:
+            return {"status": -1, "threat_type": "error", "threat_name": "Scan Error",
+                    "md5": "", "sha256": "", "entropy": 0.0, "file_size": 0}
+
+# ============================================================================
+# 파일 수집 스레드 (UI 블로킹 방지)
+# ============================================================================
+class FileCollectorThread(QThread):
+    progress_msg = pyqtSignal(str)
+    finished = pyqtSignal(list)
+    
+    def __init__(self, paths, max_files=100000, recursive=True):
+        super().__init__()
+        self.paths = paths if isinstance(paths, list) else [paths]
+        self.max_files = max_files
+        self.recursive = recursive
+        self._stop_requested = False
+    
+    def stop(self):
+        self._stop_requested = True
+    
+    def run(self):
+        file_list = []
+        for path in self.paths:
+            if self._stop_requested:
+                break
+            try:
+                if self.recursive:
+                    for root, _, files in os.walk(path):
+                        if self._stop_requested:
+                            break
+                        for name in files:
+                            if self._stop_requested:
+                                break
+                            file_list.append(os.path.join(root, name))
+                            if len(file_list) % 1000 == 0:
+                                self.progress_msg.emit(f"파일 수집 중... {len(file_list)}개")
+                            if len(file_list) >= self.max_files:
+                                break
+                        if len(file_list) >= self.max_files:
+                            break
+                else:
+                    for name in os.listdir(path):
+                        filepath = os.path.join(path, name)
+                        if os.path.isfile(filepath):
+                            file_list.append(filepath)
+            except Exception as e:
+                self.progress_msg.emit(f"오류: {e}")
+        
+        self.finished.emit(file_list)
 
 # ============================================================================
 # 배치 스캔 스레드
@@ -169,14 +376,17 @@ class BatchScanThread(QThread):
     result_msg = pyqtSignal(str)
     result_detailed = pyqtSignal(dict)
     stats_update = pyqtSignal(dict)
+    skipped_file = pyqtSignal(str)  # 제외된 파일 시그널
     finished = pyqtSignal()
 
-    def __init__(self, file_list, use_detailed=True):
+    def __init__(self, file_list, use_detailed=True, exclusions=None):
         super().__init__()
         self.file_list = file_list
         self.use_detailed = use_detailed
+        self.exclusions = exclusions or {'folders': [], 'files': [], 'extensions': [], 'hashes': []}
         self.stats = ScanStats()
         self._stop_requested = False
+        self.was_stopped = False  # 중지되었는지 여부
 
     def stop(self):
         self._stop_requested = True
@@ -184,12 +394,48 @@ class BatchScanThread(QThread):
     def run(self):
         for i, filepath in enumerate(self.file_list, 1):
             if self._stop_requested:
+                self.was_stopped = True  # 중지됨 표시
                 self.result_msg.emit("\n[중지됨] 사용자가 스캔을 중지했습니다.\n")
                 break
+
+            # 제외 목록 확인
+            excluded, reason = is_excluded(filepath, self.exclusions)
+            if excluded:
+                self.stats.skipped += 1
+                self.skipped_file.emit(f"[제외] {os.path.basename(filepath)} - {reason}")
+                self.progress.emit(i)
+                self.stats_update.emit({
+                    'total': self.stats.total_scanned,
+                    'clean': self.stats.clean_files,
+                    'malicious': self.stats.malicious_files,
+                    'suspicious': self.stats.suspicious_files,
+                    'errors': self.stats.errors,
+                    'skipped': self.stats.skipped
+                })
+                continue
 
             if self.use_detailed:
                 result_dict = scan_file_detailed(filepath)
                 result_dict['filepath'] = filepath
+                
+                # 해시 제외 확인
+                md5 = result_dict.get('md5', '')
+                sha256 = result_dict.get('sha256', '')
+                hash_excluded, hash_reason = is_hash_excluded(md5, sha256, self.exclusions)
+                if hash_excluded:
+                    self.stats.skipped += 1
+                    self.skipped_file.emit(f"[제외] {os.path.basename(filepath)} - {hash_reason}")
+                    self.progress.emit(i)
+                    self.stats_update.emit({
+                        'total': self.stats.total_scanned,
+                        'clean': self.stats.clean_files,
+                        'malicious': self.stats.malicious_files,
+                        'suspicious': self.stats.suspicious_files,
+                        'errors': self.stats.errors,
+                        'skipped': self.stats.skipped
+                    })
+                    continue
+                
                 self.result_detailed.emit(result_dict)
 
                 status = result_dict.get('status', -1)
@@ -254,11 +500,27 @@ class AntivirusGUI(QWidget):
         self.setGeometry(100, 50, 1400, 900)
         self.stats = ScanStats()
         self.scan_history = self.load_history()
-        self.dark_mode = False
+        
+        # 다크모드 설정을 먼저 로드
+        self.dark_mode = SETTINGS.get('dark_mode', False)
+        
         self.init_ui()
         self.apply_theme()
+        
+        # 다크모드면 버튼 텍스트 변경
+        if self.dark_mode:
+            self.theme_btn.setText("☀️ 라이트모드")
+        
         self.observer = None
         self.scan_thread = None
+        self.file_collector = None
+        self.scan_stopped_by_user = False  # 사용자가 중지했는지 여부
+
+        # UI 생성 후 제외 목록 로드
+        self.load_exclusion_lists()
+        
+        # 모든 설정 로드 (스캔 옵션 등)
+        self.load_all_settings()
 
         # 실시간 통계 업데이트 타이머
         self.stats_timer = QTimer()
@@ -276,8 +538,10 @@ class AntivirusGUI(QWidget):
         self.tabs = QTabWidget()
         self.tabs.addTab(self.create_dashboard_tab(), "📊 대시보드")
         self.tabs.addTab(self.create_scan_tab(), "🔍 파일 검사")
-        self.tabs.addTab(self.create_quarantine_tab(), "🗂️ 격리 구역")
+        self.tabs.addTab(self.create_advanced_analysis_tab(), "🧑‍💻 고급 분석")
+        self.tabs.addTab(self.create_quarantine_tab(), "❌ 격리 구역")
         self.tabs.addTab(self.create_monitor_tab(), "👁️ 실시간 감시")
+        self.tabs.addTab(self.create_yara_tab(), "📜 YARA 룰")
         self.tabs.addTab(self.create_settings_tab(), "⚙️ 설정")
         self.tabs.addTab(self.create_history_tab(), "📜 히스토리")
         self.tabs.addTab(self.create_help_tab(), "❓ 도움말")
@@ -312,6 +576,12 @@ class AntivirusGUI(QWidget):
         self.theme_btn.clicked.connect(self.toggle_theme)
         self.theme_btn.setStyleSheet("padding: 8px 16px;")
         layout.addWidget(self.theme_btn)
+
+        # 설정 저장 버튼
+        save_settings_btn = QPushButton("💾 설정 저장")
+        save_settings_btn.clicked.connect(self.manual_save_settings)
+        save_settings_btn.setStyleSheet("padding: 8px 16px;")
+        layout.addWidget(save_settings_btn)
 
         toolbar.setLayout(layout)
         return toolbar
@@ -605,8 +875,8 @@ class AntivirusGUI(QWidget):
         result_layout = QVBoxLayout()
 
         self.result_table = QTableWidget()
-        self.result_table.setColumnCount(6)
-        self.result_table.setHorizontalHeaderLabels(["파일명", "상태", "위협", "MD5", "크기", "작업"])
+        self.result_table.setColumnCount(7)
+        self.result_table.setHorizontalHeaderLabels(["파일명", "경로", "상태", "위협", "MD5", "크기", "작업"])
         self.result_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.result_table.setSelectionBehavior(QTableWidget.SelectRows)
         result_layout.addWidget(self.result_table)
@@ -700,6 +970,543 @@ class AntivirusGUI(QWidget):
 
         tab.setLayout(layout)
         return tab
+
+    def create_advanced_analysis_tab(self):
+        """고급 분석 탭 - PE 분석, Import 분석, 압축파일 분석"""
+        tab = QWidget()
+        layout = QVBoxLayout()
+
+        # 파일 선택
+        file_group = QGroupBox("📂 분석할 파일 선택")
+        file_layout = QHBoxLayout()
+        
+        self.analysis_file_input = QLineEdit()
+        self.analysis_file_input.setPlaceholderText("분석할 파일 경로...")
+        file_layout.addWidget(self.analysis_file_input)
+        
+        browse_btn = QPushButton("📁 찾아보기")
+        browse_btn.clicked.connect(self.browse_analysis_file)
+        file_layout.addWidget(browse_btn)
+        
+        analyze_btn = QPushButton("🔬 분석 시작")
+        analyze_btn.clicked.connect(self.run_advanced_analysis)
+        analyze_btn.setStyleSheet("background-color: #3498db; color: white; font-weight: bold; padding: 8px 16px;")
+        file_layout.addWidget(analyze_btn)
+        
+        file_group.setLayout(file_layout)
+        layout.addWidget(file_group)
+
+        # 분석 결과 영역 (3개 섹션)
+        results_splitter = QSplitter(Qt.Horizontal)
+
+        # PE 분석 결과
+        pe_group = QGroupBox("🔧 PE 분석")
+        pe_layout = QVBoxLayout()
+        self.pe_result_text = QTextEdit()
+        self.pe_result_text.setReadOnly(True)
+        self.pe_result_text.setFont(QFont("Consolas", 9))
+        self.pe_result_text.setPlaceholderText("PE 파일 분석 결과가 여기에 표시됩니다...")
+        pe_layout.addWidget(self.pe_result_text)
+        pe_group.setLayout(pe_layout)
+        results_splitter.addWidget(pe_group)
+
+        # Import 분석 결과
+        import_group = QGroupBox("📋 Import 분석")
+        import_layout = QVBoxLayout()
+        self.import_result_text = QTextEdit()
+        self.import_result_text.setReadOnly(True)
+        self.import_result_text.setFont(QFont("Consolas", 9))
+        self.import_result_text.setPlaceholderText("Import Table 분석 결과가 여기에 표시됩니다...")
+        import_layout.addWidget(self.import_result_text)
+        import_group.setLayout(import_layout)
+        results_splitter.addWidget(import_group)
+
+        # 압축파일 분석 결과
+        archive_group = QGroupBox("📦 압축파일 분석")
+        archive_layout = QVBoxLayout()
+        self.archive_result_text = QTextEdit()
+        self.archive_result_text.setReadOnly(True)
+        self.archive_result_text.setFont(QFont("Consolas", 9))
+        self.archive_result_text.setPlaceholderText("압축파일 분석 결과가 여기에 표시됩니다...")
+        archive_layout.addWidget(self.archive_result_text)
+        archive_group.setLayout(archive_layout)
+        results_splitter.addWidget(archive_group)
+
+        layout.addWidget(results_splitter)
+
+        # 엔진 정보
+        engine_group = QGroupBox("ℹ️ 엔진 정보")
+        engine_layout = QVBoxLayout()
+        self.engine_info_text = QTextEdit()
+        self.engine_info_text.setReadOnly(True)
+        self.engine_info_text.setMaximumHeight(120)
+        self.engine_info_text.setFont(QFont("Consolas", 9))
+        self.update_engine_info()
+        engine_layout.addWidget(self.engine_info_text)
+        engine_group.setLayout(engine_layout)
+        layout.addWidget(engine_group)
+
+        # 기능 상태 표시
+        status_layout = QHBoxLayout()
+        status_layout.addWidget(QLabel(f"PE 분석: {'✅' if has_pe_analysis else '❌'}"))
+        status_layout.addWidget(QLabel(f"Import 분석: {'✅' if has_import_analysis else '❌'}"))
+        status_layout.addWidget(QLabel(f"압축파일 분석: {'✅' if has_archive_analysis else '❌'}"))
+        status_layout.addWidget(QLabel(f"YARA 룰: {'✅' if has_yara else '❌'}"))
+        status_layout.addStretch()
+        layout.addLayout(status_layout)
+
+        tab.setLayout(layout)
+        return tab
+
+    def create_yara_tab(self):
+        """YARA 룰 관리 탭"""
+        tab = QWidget()
+        layout = QVBoxLayout()
+
+        # YARA 룰 추가 폼
+        add_group = QGroupBox("➕ YARA 룰 추가")
+        add_layout = QVBoxLayout()
+
+        # 첫 번째 줄: 이름, 설명
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("룰 이름:"))
+        self.yara_name_input = QLineEdit()
+        self.yara_name_input.setPlaceholderText("예: Ransomware_Custom")
+        row1.addWidget(self.yara_name_input)
+        
+        row1.addWidget(QLabel("설명:"))
+        self.yara_desc_input = QLineEdit()
+        self.yara_desc_input.setPlaceholderText("예: Custom ransomware detection")
+        row1.addWidget(self.yara_desc_input)
+        add_layout.addLayout(row1)
+
+        # 두 번째 줄: 문자열 패턴
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("문자열 패턴 (쉼표로 구분):"))
+        self.yara_strings_input = QLineEdit()
+        self.yara_strings_input.setPlaceholderText("예: encrypt,ransom,bitcoin,locked")
+        row2.addWidget(self.yara_strings_input)
+        add_layout.addLayout(row2)
+
+        # 세 번째 줄: 조건, 필요 매치 수, 위험도
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel("조건:"))
+        self.yara_condition_combo = QComboBox()
+        self.yara_condition_combo.addItems(["any", "all"])
+        row3.addWidget(self.yara_condition_combo)
+        
+        row3.addWidget(QLabel("필요 매치 수:"))
+        self.yara_required_spin = QSpinBox()
+        self.yara_required_spin.setRange(1, 10)
+        self.yara_required_spin.setValue(2)
+        row3.addWidget(self.yara_required_spin)
+        
+        row3.addWidget(QLabel("위험도:"))
+        self.yara_severity_spin = QSpinBox()
+        self.yara_severity_spin.setRange(1, 5)
+        self.yara_severity_spin.setValue(3)
+        row3.addWidget(self.yara_severity_spin)
+        
+        add_yara_btn = QPushButton("➕ YARA 룰 추가")
+        add_yara_btn.clicked.connect(self.add_yara_rule)
+        add_yara_btn.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
+        row3.addWidget(add_yara_btn)
+        add_layout.addLayout(row3)
+
+        add_group.setLayout(add_layout)
+        layout.addWidget(add_group)
+
+        # 현재 YARA 룰 목록
+        rules_group = QGroupBox("📜 현재 YARA 룰 목록")
+        rules_layout = QVBoxLayout()
+        
+        self.yara_rules_table = QTableWidget()
+        self.yara_rules_table.setColumnCount(5)
+        self.yara_rules_table.setHorizontalHeaderLabels(["룰 이름", "설명", "조건", "위험도", "상태"])
+        self.yara_rules_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        rules_layout.addWidget(self.yara_rules_table)
+        
+        # 기본 YARA 룰 표시
+        self.load_default_yara_rules()
+        
+        rules_group.setLayout(rules_layout)
+        layout.addWidget(rules_group)
+
+        # YARA 룰 테스트
+        test_group = QGroupBox("🧪 YARA 룰 테스트")
+        test_layout = QHBoxLayout()
+        
+        self.yara_test_input = QLineEdit()
+        self.yara_test_input.setPlaceholderText("테스트할 파일 경로...")
+        test_layout.addWidget(self.yara_test_input)
+        
+        test_browse_btn = QPushButton("📁 찾아보기")
+        test_browse_btn.clicked.connect(self.browse_yara_test_file)
+        test_layout.addWidget(test_browse_btn)
+        
+        test_btn = QPushButton("🧪 테스트")
+        test_btn.clicked.connect(self.test_yara_rules)
+        test_btn.setStyleSheet("background-color: #9b59b6; color: white; font-weight: bold;")
+        test_layout.addWidget(test_btn)
+        
+        test_group.setLayout(test_layout)
+        layout.addWidget(test_group)
+
+        # 테스트 결과
+        result_group = QGroupBox("📊 테스트 결과")
+        result_layout = QVBoxLayout()
+        self.yara_test_result = QTextEdit()
+        self.yara_test_result.setReadOnly(True)
+        self.yara_test_result.setFont(QFont("Consolas", 9))
+        self.yara_test_result.setMaximumHeight(150)
+        result_layout.addWidget(self.yara_test_result)
+        result_group.setLayout(result_layout)
+        layout.addWidget(result_group)
+
+        tab.setLayout(layout)
+        return tab
+
+    # ========================================================================
+    # 고급 분석 기능 구현
+    # ========================================================================
+    
+    def browse_analysis_file(self):
+        """분석할 파일 선택"""
+        file, _ = QFileDialog.getOpenFileName(self, "분석할 파일 선택")
+        if file:
+            self.analysis_file_input.setText(file)
+
+    def run_advanced_analysis(self):
+        """고급 분석 실행"""
+        filepath = self.analysis_file_input.text().strip()
+        if not filepath:
+            QMessageBox.warning(self, "경고", "분석할 파일을 선택하세요.")
+            return
+        
+        if not os.path.exists(filepath):
+            QMessageBox.warning(self, "경고", "파일을 찾을 수 없습니다.")
+            return
+
+        # PE 분석
+        if has_pe_analysis:
+            try:
+                result_ptr = engine.analyze_pe_file(filepath)
+                if result_ptr:
+                    try:
+                        result = json.loads(result_ptr.decode('utf-8'))
+                    except UnicodeDecodeError:
+                        result = json.loads(result_ptr.decode('utf-8', errors='replace'))
+                    pe_text = self.format_pe_result(result)
+                    self.pe_result_text.setPlainText(pe_text)
+                else:
+                    self.pe_result_text.setPlainText("PE 분석 실패: NULL 반환")
+            except Exception as e:
+                self.pe_result_text.setPlainText(f"PE 분석 오류: {e}")
+        else:
+            self.pe_result_text.setPlainText("PE 분석 기능이 지원되지 않습니다.\nDLL을 업데이트하세요.")
+
+        # Import 분석
+        if has_import_analysis:
+            try:
+                result_ptr = engine.analyze_imports_api(filepath)
+                if result_ptr:
+                    try:
+                        result = json.loads(result_ptr.decode('utf-8'))
+                    except UnicodeDecodeError:
+                        result = json.loads(result_ptr.decode('utf-8', errors='replace'))
+                    import_text = self.format_import_result(result)
+                    self.import_result_text.setPlainText(import_text)
+                else:
+                    self.import_result_text.setPlainText("Import 분석 실패: NULL 반환")
+            except Exception as e:
+                self.import_result_text.setPlainText(f"Import 분석 오류: {e}")
+        else:
+            self.import_result_text.setPlainText("Import 분석 기능이 지원되지 않습니다.\nDLL을 업데이트하세요.")
+
+        # 압축파일 분석
+        if has_archive_analysis:
+            try:
+                result_ptr = engine.analyze_archive(filepath)
+                if result_ptr:
+                    # 한글 파일명 처리를 위해 여러 인코딩 시도
+                    try:
+                        result = json.loads(result_ptr.decode('utf-8'))
+                    except UnicodeDecodeError:
+                        try:
+                            result = json.loads(result_ptr.decode('cp949'))
+                        except:
+                            result = json.loads(result_ptr.decode('utf-8', errors='replace'))
+                    archive_text = self.format_archive_result(result)
+                    self.archive_result_text.setPlainText(archive_text)
+                else:
+                    self.archive_result_text.setPlainText("압축파일 분석 실패: NULL 반환")
+            except Exception as e:
+                self.archive_result_text.setPlainText(f"압축파일 분석 오류: {e}")
+        else:
+            self.archive_result_text.setPlainText("압축파일 분석 기능이 지원되지 않습니다.\nDLL을 업데이트하세요.")
+
+        self.status_label.setText(f"분석 완료: {os.path.basename(filepath)}")
+
+    def format_pe_result(self, result):
+        """PE 분석 결과 포맷팅"""
+        if 'error' in result:
+            return f"오류: {result['error']}"
+        
+        lines = []
+        lines.append("=" * 40)
+        lines.append("         PE 파일 분석 결과")
+        lines.append("=" * 40)
+        lines.append("")
+        lines.append(f"📌 PE 파일: {'예' if result.get('is_pe') else '아니오'}")
+        lines.append(f"📌 64비트: {'예' if result.get('is_64bit') else '아니오'}")
+        lines.append(f"📌 패킹됨: {'⚠️ 예' if result.get('is_packed') else '아니오'}")
+        lines.append(f"📌 의심스러움: {'⚠️ 예' if result.get('is_suspicious') else '아니오'}")
+        lines.append("")
+        lines.append(f"섹션 수: {result.get('section_count', 0)}")
+        lines.append(f"Entry Point: 0x{result.get('entry_point', 0):08X}")
+        lines.append(f"Timestamp: {result.get('timestamp', 0)}")
+        lines.append("")
+        lines.append("섹션 목록:")
+        sections = result.get('sections', '')
+        if sections:
+            for sec in sections.split(', '):
+                lines.append(f"  • {sec}")
+        lines.append("")
+        if result.get('details'):
+            lines.append("상세 정보:")
+            lines.append(f"  {result.get('details')}")
+        
+        return '\n'.join(lines)
+
+    def format_import_result(self, result):
+        """Import 분석 결과 포맷팅"""
+        if 'error' in result:
+            return f"오류: {result['error']}"
+        
+        lines = []
+        lines.append("=" * 40)
+        lines.append("       Import Table 분석 결과")
+        lines.append("=" * 40)
+        lines.append("")
+        lines.append(f"📌 분석 성공: {'예' if result.get('success') else '아니오'}")
+        lines.append(f"📌 DLL 수: {result.get('dll_count', 0)}")
+        lines.append(f"📌 함수 수: {result.get('function_count', 0)}")
+        lines.append("")
+        
+        risk_score = result.get('risk_score', 0)
+        risk_emoji = "🟢" if risk_score < 10 else "🟡" if risk_score < 30 else "🔴"
+        lines.append(f"⚠️ 위험 점수: {risk_emoji} {risk_score}")
+        lines.append(f"⚠️ 위험 카테고리: {result.get('risk_category', 'N/A')}")
+        lines.append("")
+        
+        dlls = result.get('dlls', '')
+        if dlls:
+            lines.append("Import된 DLL:")
+            for dll in dlls.split(', ')[:10]:
+                lines.append(f"  • {dll}")
+        lines.append("")
+        
+        suspicious = result.get('suspicious_apis', '')
+        if suspicious:
+            lines.append("🚨 의심스러운 API:")
+            for api in suspicious.split(', '):
+                lines.append(f"  ⚠️ {api}")
+        else:
+            lines.append("✅ 의심스러운 API 없음")
+        
+        return '\n'.join(lines)
+
+    def format_archive_result(self, result):
+        """압축파일 분석 결과 포맷팅"""
+        if 'error' in result:
+            return f"오류: {result['error']}"
+        
+        lines = []
+        lines.append("=" * 40)
+        lines.append("        압축파일 분석 결과")
+        lines.append("=" * 40)
+        lines.append("")
+        
+        is_archive = result.get('is_archive', False)
+        lines.append(f"📌 압축파일: {'예' if is_archive else '아니오'}")
+        
+        if not is_archive:
+            lines.append("")
+            lines.append("이 파일은 ZIP 압축파일이 아닙니다.")
+            return '\n'.join(lines)
+        
+        lines.append(f"📌 파일 수: {result.get('file_count', 0)}")
+        lines.append(f"📌 실행파일 포함: {'⚠️ 예' if result.get('has_executable') else '아니오'}")
+        lines.append(f"📌 의심스러운 파일: {'🚨 예' if result.get('has_suspicious') else '아니오'}")
+        lines.append("")
+        
+        if result.get('suspicious_file'):
+            lines.append(f"🚨 의심스러운 파일: {result.get('suspicious_file')}")
+            lines.append("")
+        
+        files = result.get('files', '')
+        if files:
+            lines.append("압축파일 내용:")
+            for f in files.split(', ')[:15]:
+                emoji = "⚠️" if any(ext in f.lower() for ext in ['.exe', '.dll', '.bat', '.cmd', '.ps1', '.vbs']) else "📄"
+                lines.append(f"  {emoji} {f}")
+        
+        return '\n'.join(lines)
+
+    def update_engine_info(self):
+        """엔진 정보 업데이트"""
+        try:
+            if hasattr(engine, 'get_engine_stats'):
+                result_ptr = engine.get_engine_stats()
+                if result_ptr:
+                    result = json.loads(result_ptr.decode('utf-8'))
+                    info_lines = []
+                    info_lines.append(f"엔진 버전: {result.get('version', 'Unknown')}")
+                    info_lines.append(f"시그니처: {result.get('signatures', 0)}개")
+                    info_lines.append(f"YARA 룰: {result.get('yara_rules', 0)}개")
+                    info_lines.append(f"의심 API: {result.get('suspicious_apis', 0)}개")
+                    info_lines.append(f"MD5 해시: {result.get('md5_hashes', 0)}개")
+                    info_lines.append(f"SHA256 해시: {result.get('sha256_hashes', 0)}개")
+                    features = result.get('features', [])
+                    if features:
+                        info_lines.append(f"기능: {', '.join(features)}")
+                    self.engine_info_text.setPlainText('\n'.join(info_lines))
+                    return
+        except Exception as e:
+            pass
+        
+        self.engine_info_text.setPlainText("엔진 정보를 가져올 수 없습니다.")
+
+    # ========================================================================
+    # YARA 룰 기능 구현
+    # ========================================================================
+    
+    def load_default_yara_rules(self):
+        """기본 YARA 룰 목록 표시"""
+        default_rules = [
+            ("Ransomware_Generic", "Generic ransomware detection", "any", 4, "내장"),
+            ("Trojan_Downloader", "Trojan downloader detection", "any", 3, "내장"),
+            ("Keylogger_Generic", "Generic keylogger detection", "any", 3, "내장"),
+            ("Backdoor_Generic", "Generic backdoor detection", "any", 4, "내장"),
+            ("Cryptominer", "Cryptocurrency miner detection", "any", 3, "내장"),
+            ("Packed_UPX", "UPX packed executable", "any", 2, "내장"),
+            ("Suspicious_Injection", "Process injection techniques", "any", 4, "내장"),
+            ("EICAR_Test", "EICAR test file", "any", 1, "내장"),
+        ]
+        
+        self.yara_rules_table.setRowCount(len(default_rules))
+        for row, (name, desc, condition, severity, status) in enumerate(default_rules):
+            self.yara_rules_table.setItem(row, 0, QTableWidgetItem(name))
+            self.yara_rules_table.setItem(row, 1, QTableWidgetItem(desc))
+            self.yara_rules_table.setItem(row, 2, QTableWidgetItem(condition))
+            self.yara_rules_table.setItem(row, 3, QTableWidgetItem(str(severity)))
+            self.yara_rules_table.setItem(row, 4, QTableWidgetItem(status))
+
+    def add_yara_rule(self):
+        """YARA 룰 추가"""
+        if not has_yara:
+            QMessageBox.warning(self, "기능 없음", "현재 DLL은 YARA 룰 추가를 지원하지 않습니다.\nDLL을 업데이트하세요.")
+            return
+        
+        name = self.yara_name_input.text().strip()
+        desc = self.yara_desc_input.text().strip()
+        strings = self.yara_strings_input.text().strip()
+        condition = self.yara_condition_combo.currentText()
+        required = self.yara_required_spin.value()
+        severity = self.yara_severity_spin.value()
+        
+        if not name:
+            QMessageBox.warning(self, "경고", "룰 이름을 입력하세요.")
+            return
+        
+        if not strings:
+            QMessageBox.warning(self, "경고", "문자열 패턴을 입력하세요.")
+            return
+        
+        try:
+            count = engine.add_yara_rule(
+                name.encode('utf-8'),
+                desc.encode('utf-8'),
+                strings.encode('utf-8'),
+                condition.encode('utf-8'),
+                required,
+                severity
+            )
+            
+            # 테이블에 추가
+            row = self.yara_rules_table.rowCount()
+            self.yara_rules_table.insertRow(row)
+            self.yara_rules_table.setItem(row, 0, QTableWidgetItem(name))
+            self.yara_rules_table.setItem(row, 1, QTableWidgetItem(desc))
+            self.yara_rules_table.setItem(row, 2, QTableWidgetItem(condition))
+            self.yara_rules_table.setItem(row, 3, QTableWidgetItem(str(severity)))
+            self.yara_rules_table.setItem(row, 4, QTableWidgetItem("사용자 정의"))
+            
+            # 입력 필드 초기화
+            self.yara_name_input.clear()
+            self.yara_desc_input.clear()
+            self.yara_strings_input.clear()
+            
+            QMessageBox.information(self, "성공", 
+                f"YARA 룰이 추가되었습니다!\n\n"
+                f"이름: {name}\n"
+                f"패턴: {strings}\n"
+                f"총 룰 수: {count}")
+            
+            # 엔진 정보 업데이트
+            self.update_engine_info()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"YARA 룰 추가 실패:\n{e}")
+
+    def browse_yara_test_file(self):
+        """YARA 테스트 파일 선택"""
+        file, _ = QFileDialog.getOpenFileName(self, "테스트할 파일 선택")
+        if file:
+            self.yara_test_input.setText(file)
+
+    def test_yara_rules(self):
+        """YARA 룰 테스트"""
+        filepath = self.yara_test_input.text().strip()
+        if not filepath:
+            QMessageBox.warning(self, "경고", "테스트할 파일을 선택하세요.")
+            return
+        
+        if not os.path.exists(filepath):
+            QMessageBox.warning(self, "경고", "파일을 찾을 수 없습니다.")
+            return
+        
+        try:
+            # 상세 스캔으로 YARA 결과 확인
+            result = scan_file_detailed(filepath)
+            
+            lines = []
+            lines.append("=" * 40)
+            lines.append("        YARA 룰 테스트 결과")
+            lines.append("=" * 40)
+            lines.append("")
+            lines.append(f"파일: {os.path.basename(filepath)}")
+            lines.append("")
+            
+            yara_rule = result.get('yara_rule', '')
+            yara_matches = result.get('yara_matches', '')
+            
+            if yara_rule:
+                lines.append(f"🚨 매치된 룰: {yara_rule}")
+                if yara_matches:
+                    lines.append(f"📌 매치된 패턴: {yara_matches}")
+                lines.append(f"⚠️ 위험도: {result.get('severity', 0)}")
+            else:
+                lines.append("✅ 매치된 YARA 룰 없음")
+            
+            lines.append("")
+            lines.append(f"전체 상태: {result.get('threat_name', 'Unknown')}")
+            lines.append(f"위협 유형: {result.get('threat_type', 'none')}")
+            
+            self.yara_test_result.setPlainText('\n'.join(lines))
+            
+        except Exception as e:
+            self.yara_test_result.setPlainText(f"테스트 오류: {e}")
 
     def create_settings_tab(self):
         tab = QWidget()
@@ -809,6 +1616,151 @@ class AntivirusGUI(QWidget):
         hash_layout.addLayout(hash_form)
         hash_group.setLayout(hash_layout)
         layout.addWidget(hash_group)
+
+        # ================================================================
+        # 검사 제외 설정
+        # ================================================================
+        exclusion_group = QGroupBox("🚫 검사 제외 설정")
+        exclusion_layout = QVBoxLayout()
+        
+        # 탭으로 제외 유형 구분
+        exclusion_tabs = QTabWidget()
+        
+        # 폴더 제외 탭
+        folder_tab = QWidget()
+        folder_layout = QVBoxLayout()
+        
+        folder_input_layout = QHBoxLayout()
+        self.exclusion_folder_input = QLineEdit()
+        self.exclusion_folder_input.setPlaceholderText("제외할 폴더 경로 입력 또는 찾아보기")
+        folder_input_layout.addWidget(self.exclusion_folder_input)
+        
+        folder_browse_btn = QPushButton('📂 찾아보기')
+        folder_browse_btn.clicked.connect(self.browse_exclusion_folder)
+        folder_input_layout.addWidget(folder_browse_btn)
+        
+        folder_add_btn = QPushButton('➕ 추가')
+        folder_add_btn.clicked.connect(self.add_exclusion_folder)
+        folder_input_layout.addWidget(folder_add_btn)
+        folder_layout.addLayout(folder_input_layout)
+        
+        self.exclusion_folder_list = QListWidget()
+        self.exclusion_folder_list.setMaximumHeight(150)
+        folder_layout.addWidget(self.exclusion_folder_list)
+        
+        folder_btn_layout = QHBoxLayout()
+        folder_remove_btn = QPushButton('🗑️ 선택 삭제')
+        folder_remove_btn.clicked.connect(lambda: self.remove_exclusion_item('folders'))
+        folder_btn_layout.addWidget(folder_remove_btn)
+        folder_btn_layout.addStretch()
+        folder_layout.addLayout(folder_btn_layout)
+        
+        folder_tab.setLayout(folder_layout)
+        exclusion_tabs.addTab(folder_tab, "📁 폴더")
+        
+        # 파일 제외 탭
+        file_tab = QWidget()
+        file_layout = QVBoxLayout()
+        
+        file_input_layout = QHBoxLayout()
+        self.exclusion_file_input = QLineEdit()
+        self.exclusion_file_input.setPlaceholderText("제외할 파일 경로 입력 또는 찾아보기")
+        file_input_layout.addWidget(self.exclusion_file_input)
+        
+        file_browse_btn = QPushButton('📄 찾아보기')
+        file_browse_btn.clicked.connect(self.browse_exclusion_file)
+        file_input_layout.addWidget(file_browse_btn)
+        
+        file_add_btn = QPushButton('➕ 추가')
+        file_add_btn.clicked.connect(self.add_exclusion_file)
+        file_input_layout.addWidget(file_add_btn)
+        file_layout.addLayout(file_input_layout)
+        
+        self.exclusion_file_list = QListWidget()
+        self.exclusion_file_list.setMaximumHeight(150)
+        file_layout.addWidget(self.exclusion_file_list)
+        
+        file_btn_layout = QHBoxLayout()
+        file_remove_btn = QPushButton('🗑️ 선택 삭제')
+        file_remove_btn.clicked.connect(lambda: self.remove_exclusion_item('files'))
+        file_btn_layout.addWidget(file_remove_btn)
+        file_btn_layout.addStretch()
+        file_layout.addLayout(file_btn_layout)
+        
+        file_tab.setLayout(file_layout)
+        exclusion_tabs.addTab(file_tab, "📄 파일")
+        
+        # 확장자 제외 탭
+        ext_tab = QWidget()
+        ext_layout = QVBoxLayout()
+        
+        ext_input_layout = QHBoxLayout()
+        self.exclusion_ext_input = QLineEdit()
+        self.exclusion_ext_input.setPlaceholderText("제외할 확장자 (예: .txt, .log)")
+        ext_input_layout.addWidget(self.exclusion_ext_input)
+        
+        ext_add_btn = QPushButton('➕ 추가')
+        ext_add_btn.clicked.connect(self.add_exclusion_extension)
+        ext_input_layout.addWidget(ext_add_btn)
+        ext_layout.addLayout(ext_input_layout)
+        
+        self.exclusion_ext_list = QListWidget()
+        self.exclusion_ext_list.setMaximumHeight(150)
+        ext_layout.addWidget(self.exclusion_ext_list)
+        
+        ext_btn_layout = QHBoxLayout()
+        ext_remove_btn = QPushButton('🗑️ 선택 삭제')
+        ext_remove_btn.clicked.connect(lambda: self.remove_exclusion_item('extensions'))
+        ext_btn_layout.addWidget(ext_remove_btn)
+        ext_btn_layout.addStretch()
+        ext_layout.addLayout(ext_btn_layout)
+        
+        ext_tab.setLayout(ext_layout)
+        exclusion_tabs.addTab(ext_tab, "📝 확장자")
+        
+        # 해시 제외 탭
+        hash_exc_tab = QWidget()
+        hash_exc_layout = QVBoxLayout()
+        
+        hash_exc_input_layout = QHBoxLayout()
+        self.exclusion_hash_input = QLineEdit()
+        self.exclusion_hash_input.setPlaceholderText("제외할 해시값 (MD5 또는 SHA256)")
+        hash_exc_input_layout.addWidget(self.exclusion_hash_input)
+        
+        self.exclusion_hash_desc = QLineEdit()
+        self.exclusion_hash_desc.setPlaceholderText("설명 (선택)")
+        self.exclusion_hash_desc.setMaximumWidth(150)
+        hash_exc_input_layout.addWidget(self.exclusion_hash_desc)
+        
+        hash_exc_add_btn = QPushButton('➕ 추가')
+        hash_exc_add_btn.clicked.connect(self.add_exclusion_hash)
+        hash_exc_input_layout.addWidget(hash_exc_add_btn)
+        hash_exc_layout.addLayout(hash_exc_input_layout)
+        
+        self.exclusion_hash_list = QListWidget()
+        self.exclusion_hash_list.setMaximumHeight(150)
+        hash_exc_layout.addWidget(self.exclusion_hash_list)
+        
+        hash_exc_btn_layout = QHBoxLayout()
+        hash_exc_remove_btn = QPushButton('🗑️ 선택 삭제')
+        hash_exc_remove_btn.clicked.connect(lambda: self.remove_exclusion_item('hashes'))
+        hash_exc_btn_layout.addWidget(hash_exc_remove_btn)
+        hash_exc_btn_layout.addStretch()
+        hash_exc_layout.addLayout(hash_exc_btn_layout)
+        
+        hash_exc_tab.setLayout(hash_exc_layout)
+        exclusion_tabs.addTab(hash_exc_tab, "🔑 해시")
+        
+        exclusion_layout.addWidget(exclusion_tabs)
+        
+        # 전체 삭제 버튼
+        clear_all_exclusions_btn = QPushButton('🧹 모든 제외 목록 삭제')
+        clear_all_exclusions_btn.clicked.connect(self.clear_all_exclusions)
+        clear_all_exclusions_btn.setStyleSheet("background-color: #e74c3c; color: white;")
+        exclusion_layout.addWidget(clear_all_exclusions_btn)
+        
+        exclusion_group.setLayout(exclusion_layout)
+        layout.addWidget(exclusion_group)
 
         layout.addStretch()
         tab.setLayout(layout)
@@ -991,6 +1943,44 @@ li {{ margin: 5px 0; }}
 </ul>
 </div>
 
+<h2>🔬 고급 분석 (NEW!)</h2>
+<div class="feature">
+<p><strong>PE 파일 분석</strong></p>
+<ul>
+<li>PE 헤더 정보 (32/64비트, 섹션 수, Entry Point)</li>
+<li>패킹 탐지 (UPX, ASPack, Themida 등)</li>
+<li>의심스러운 섹션 특성 분석</li>
+</ul>
+<p><strong>Import Table 분석</strong></p>
+<ul>
+<li>Import된 DLL 및 함수 목록</li>
+<li>의심스러운 API 탐지 (40+ 패턴)</li>
+<li>위험 점수 계산 및 카테고리 분류</li>
+</ul>
+<p><strong>압축파일 분석</strong></p>
+<ul>
+<li>ZIP 파일 내부 파일 목록</li>
+<li>실행파일 포함 여부 탐지</li>
+<li>이중 확장자 탐지 (예: .pdf.exe)</li>
+</ul>
+</div>
+
+<h2>📜 YARA 룰 (NEW!)</h2>
+<div class="feature">
+<p><strong>YARA 룰 엔진</strong></p>
+<ul>
+<li>8개 내장 룰 (랜섬웨어, 트로이목마, 키로거 등)</li>
+<li>사용자 정의 룰 추가 가능</li>
+<li>문자열 패턴 및 헥스 패턴 지원</li>
+<li>조건 설정 (any/all, 필요 매치 수)</li>
+</ul>
+<p><strong>YARA 룰 테스트</strong></p>
+<ul>
+<li>파일 선택하여 룰 매칭 테스트</li>
+<li>매치된 룰 및 패턴 확인</li>
+</ul>
+</div>
+
 <h2>⚙️ 설정</h2>
 <div class="feature">
 <p><strong>격리 폴더 설정 (NEW!)</strong></p>
@@ -1124,15 +2114,22 @@ li {{ margin: 5px 0; }}
             else:
                 root_path = "/"
 
-            file_list = []
-            for root, _, files in os.walk(root_path):
-                for name in files:
-                    file_list.append(os.path.join(root, name))
-                    if len(file_list) > 10000:  # 최대 10000개 파일로 제한
-                        break
-
-            if file_list:
-                self._start_batch_scan(file_list, "전체 시스템 스캔")
+            self.progress_label.setText("파일 수집 중...")
+            self.status_label.setText("파일 목록 수집 중...")
+            
+            # 버튼 비활성화
+            self.select_btn.setEnabled(False)
+            self.folder_btn.setEnabled(False)
+            self.full_scan_btn.setEnabled(False)
+            self.drive_scan_btn.setEnabled(False)
+            self.all_drives_btn.setEnabled(False)
+            self.usb_scan_btn.setEnabled(False)
+            self.stop_scan_btn.setEnabled(True)
+            
+            self.file_collector = FileCollectorThread([root_path], max_files=10000)
+            self.file_collector.progress_msg.connect(lambda msg: self.progress_label.setText(msg))
+            self.file_collector.finished.connect(lambda files: self._on_files_collected(files, "전체 시스템 스캔"))
+            self.file_collector.start()
 
     def scan_drive(self):
         """특정 드라이브 선택 검사"""
@@ -1159,21 +2156,22 @@ li {{ margin: 5px 0; }}
                                              f'{drive} 드라이브 전체를 검사하시겠습니까?\n시간이 오래 걸릴 수 있습니다.',
                                              QMessageBox.Yes | QMessageBox.No)
                 if reply == QMessageBox.Yes:
-                    file_list = []
-                    try:
-                        for root, _, files in os.walk(drive):
-                            for name in files:
-                                file_list.append(os.path.join(root, name))
-                                if len(file_list) > 50000:  # 최대 50000개 파일로 제한
-                                    break
-                    except Exception as e:
-                        QMessageBox.warning(self, "오류", f"드라이브 접근 오류:\n{e}")
-                        return
-
-                    if file_list:
-                        self._start_batch_scan(file_list, f"{drive} 드라이브 스캔")
-                    else:
-                        QMessageBox.information(self, "알림", "스캔할 파일이 없습니다.")
+                    self.progress_label.setText("파일 수집 중...")
+                    self.status_label.setText(f"{drive} 드라이브 파일 목록 수집 중...")
+                    
+                    # 버튼 비활성화
+                    self.select_btn.setEnabled(False)
+                    self.folder_btn.setEnabled(False)
+                    self.full_scan_btn.setEnabled(False)
+                    self.drive_scan_btn.setEnabled(False)
+                    self.all_drives_btn.setEnabled(False)
+                    self.usb_scan_btn.setEnabled(False)
+                    self.stop_scan_btn.setEnabled(True)
+                    
+                    self.file_collector = FileCollectorThread([drive], max_files=50000)
+                    self.file_collector.progress_msg.connect(lambda msg: self.progress_label.setText(msg))
+                    self.file_collector.finished.connect(lambda files: self._on_files_collected(files, f"{drive} 드라이브 스캔"))
+                    self.file_collector.start()
         else:
             # Linux/Mac: 폴더 선택
             folder = QFileDialog.getExistingDirectory(self, "검사할 폴더 선택")
@@ -1200,28 +2198,40 @@ li {{ margin: 5px 0; }}
                                          f'⚠️ 시간이 매우 오래 걸릴 수 있습니다!',
                                          QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.Yes:
-                file_list = []
-                scanned_drives = []
-                for drive in available_drives:
-                    try:
-                        drive_files = 0
-                        for root, _, files in os.walk(drive):
-                            for name in files:
-                                file_list.append(os.path.join(root, name))
-                                drive_files += 1
-                                if len(file_list) > 100000:  # 최대 100000개 파일로 제한
-                                    break
-                        scanned_drives.append(f"{drive} ({drive_files}개)")
-                    except Exception as e:
-                        print(f"드라이브 {drive} 스캔 오류: {e}")
-                        continue
-
-                if file_list:
-                    self._start_batch_scan(file_list, f"모든 드라이브 스캔 ({', '.join(scanned_drives)})")
-                else:
-                    QMessageBox.information(self, "알림", "스캔할 파일이 없습니다.")
+                self.progress_label.setText("파일 수집 중...")
+                self.status_label.setText("모든 드라이브 파일 목록 수집 중...")
+                
+                # 버튼 비활성화
+                self.select_btn.setEnabled(False)
+                self.folder_btn.setEnabled(False)
+                self.full_scan_btn.setEnabled(False)
+                self.drive_scan_btn.setEnabled(False)
+                self.all_drives_btn.setEnabled(False)
+                self.usb_scan_btn.setEnabled(False)
+                self.stop_scan_btn.setEnabled(True)
+                
+                self.file_collector = FileCollectorThread(available_drives, max_files=100000)
+                self.file_collector.progress_msg.connect(lambda msg: self.progress_label.setText(msg))
+                self.file_collector.finished.connect(lambda files: self._on_files_collected(files, "모든 드라이브 스캔"))
+                self.file_collector.start()
         else:
             QMessageBox.information(self, "알림", "이 기능은 Windows에서만 사용 가능합니다.")
+    
+    def _on_files_collected(self, file_list, scan_type):
+        """파일 수집 완료 후 스캔 시작"""
+        if file_list:
+            self._start_batch_scan(file_list, scan_type)
+        else:
+            # 버튼 다시 활성화
+            self.select_btn.setEnabled(True)
+            self.folder_btn.setEnabled(True)
+            self.full_scan_btn.setEnabled(True)
+            self.drive_scan_btn.setEnabled(True)
+            self.all_drives_btn.setEnabled(True)
+            self.usb_scan_btn.setEnabled(True)
+            self.progress_label.setText("대기 중...")
+            self.status_label.setText("준비 완료")
+            QMessageBox.information(self, "알림", "스캔할 파일이 없습니다.")
 
     def scan_usb(self):
         """USB 드라이브 검사"""
@@ -1289,6 +2299,14 @@ li {{ margin: 5px 0; }}
         if not files:
             return
 
+        # 이미 스캔 중인지 확인
+        if self.scan_thread and self.scan_thread.isRunning():
+            QMessageBox.warning(self, "경고", "이미 스캔이 진행 중입니다.\n먼저 현재 스캔을 중지하세요.")
+            return
+
+        # 중지 플래그 초기화
+        self.scan_stopped_by_user = False
+
         self.result_table.setRowCount(0)
         self.progress.setMaximum(len(files))
         self.progress.setValue(0)
@@ -1303,21 +2321,102 @@ li {{ margin: 5px 0; }}
         self.usb_scan_btn.setEnabled(False)
         self.stop_scan_btn.setEnabled(True)
 
-        self.scan_thread = BatchScanThread(files, self.detailed_check.isChecked())
+        # 제외 목록 가져오기
+        exclusions = SETTINGS.get('exclusions', {'folders': [], 'files': [], 'extensions': [], 'hashes': []})
+
+        self.scan_thread = BatchScanThread(files, self.detailed_check.isChecked(), exclusions)
         self.scan_thread.progress.connect(self.progress.setValue)
         self.scan_thread.result_detailed.connect(self.add_result_to_table)
         self.scan_thread.stats_update.connect(self.update_stats)
+        self.scan_thread.skipped_file.connect(self.on_file_skipped)
         self.scan_thread.finished.connect(lambda: self.scan_finished(scan_type, len(files)))
         self.scan_thread.start()
 
+    def on_file_skipped(self, msg):
+        """제외된 파일 처리"""
+        # 로그에만 기록 (UI에 표시하지 않음)
+        print(msg)
+
     def stop_scan(self):
+        # 파일 수집 중인 경우
+        if hasattr(self, 'file_collector') and self.file_collector and self.file_collector.isRunning():
+            reply = QMessageBox.question(self, '스캔 중지', '파일 수집을 중지하시겠습니까?',
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.file_collector.stop()
+                try:
+                    self.file_collector.progress_msg.disconnect()
+                    self.file_collector.finished.disconnect()
+                except:
+                    pass
+                
+                self.stop_scan_btn.setEnabled(False)
+                self.progress.setValue(100)
+                self.progress.setMaximum(100)
+                self.progress_label.setText("⛔ 파일 수집이 중지되었습니다.")
+                
+                # 버튼 상태 복원
+                self.select_btn.setEnabled(True)
+                self.folder_btn.setEnabled(True)
+                self.full_scan_btn.setEnabled(True)
+                self.drive_scan_btn.setEnabled(True)
+                self.all_drives_btn.setEnabled(True)
+                self.usb_scan_btn.setEnabled(True)
+                
+                self.status_label.setText("파일 수집 중지됨")
+                QMessageBox.information(self, "중지", "파일 수집이 중지되었습니다.")
+            return
+        
+        # 스캔 중인 경우
         if self.scan_thread and self.scan_thread.isRunning():
             reply = QMessageBox.question(self, '스캔 중지', '정말로 스캔을 중지하시겠습니까?',
                                          QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.Yes:
+                # 중지 플래그 설정
+                self.scan_stopped_by_user = True
+                
+                # 스레드 중지 요청
                 self.scan_thread.stop()
-                self.progress_label.setText("스캔 중지 중...")
+                
+                # 시그널 연결 해제 (더 이상 UI 업데이트 안함)
+                try:
+                    self.scan_thread.progress.disconnect()
+                    self.scan_thread.result_detailed.disconnect()
+                    self.scan_thread.stats_update.disconnect()
+                    self.scan_thread.skipped_file.disconnect()
+                    self.scan_thread.finished.disconnect()
+                except:
+                    pass
+                
                 self.stop_scan_btn.setEnabled(False)
+                
+                # 진행바 100%로 설정
+                self.progress.setValue(self.progress.maximum())
+                self.progress_label.setText("⛔ 스캔이 중지되었습니다.")
+                
+                # 버튼 상태 복원
+                self.select_btn.setEnabled(True)
+                self.folder_btn.setEnabled(True)
+                self.full_scan_btn.setEnabled(True)
+                self.drive_scan_btn.setEnabled(True)
+                self.all_drives_btn.setEnabled(True)
+                self.usb_scan_btn.setEnabled(True)
+                
+                self.status_label.setText("스캔 중지됨")
+                
+                # 대시보드 업데이트 (차트 포함)
+                self.update_dashboard()
+                self.update_pie_chart()
+                
+                # 중지 알림
+                QMessageBox.information(self, "스캔 중지", 
+                    f"스캔이 중지되었습니다.\n\n"
+                    f"검사된 파일: {self.stats.total_scanned}개\n"
+                    f"정상: {self.stats.clean_files}개\n"
+                    f"악성: {self.stats.malicious_files}개\n"
+                    f"의심: {self.stats.suspicious_files}개")
+        else:
+            QMessageBox.information(self, "알림", "현재 진행 중인 스캔이 없습니다.")
 
     def add_result_to_table(self, result):
         row = self.result_table.rowCount()
@@ -1325,6 +2424,7 @@ li {{ margin: 5px 0; }}
 
         filepath = result.get('filepath', '')
         filename = os.path.basename(filepath)
+        folder_path = os.path.dirname(filepath)
         status = result.get('status', -1)
         threat = result.get('threat_name', 'Unknown')
         md5 = result.get('md5', '')[:16] + "..." if result.get('md5') else ""
@@ -1334,16 +2434,17 @@ li {{ margin: 5px 0; }}
         status_text = status_map.get(status, "❓ 알수없음")
 
         self.result_table.setItem(row, 0, QTableWidgetItem(filename))
-        self.result_table.setItem(row, 1, QTableWidgetItem(status_text))
-        self.result_table.setItem(row, 2, QTableWidgetItem(threat))
-        self.result_table.setItem(row, 3, QTableWidgetItem(md5))
-        self.result_table.setItem(row, 4, QTableWidgetItem(f"{size} bytes"))
+        self.result_table.setItem(row, 1, QTableWidgetItem(folder_path))
+        self.result_table.setItem(row, 2, QTableWidgetItem(status_text))
+        self.result_table.setItem(row, 3, QTableWidgetItem(threat))
+        self.result_table.setItem(row, 4, QTableWidgetItem(md5))
+        self.result_table.setItem(row, 5, QTableWidgetItem(f"{size} bytes"))
 
         # 작업 버튼
         if status in [1, 2, 3]:  # 악성 또는 의심
             quarantine_btn = QPushButton('🗂️ 격리')
             quarantine_btn.clicked.connect(lambda: self.quarantine_file(filepath, threat))
-            self.result_table.setCellWidget(row, 5, quarantine_btn)
+            self.result_table.setCellWidget(row, 6, quarantine_btn)
 
             # 최근 위협 목록에 추가
             self.recent_threats_list.addItem(f"[{datetime.now().strftime('%H:%M:%S')}] {threat} - {filename}")
@@ -1361,6 +2462,18 @@ li {{ margin: 5px 0; }}
         self.progress_label.setText(f"진행 중... 정상: {stats['clean']}, 악성: {stats['malicious']}, 의심: {stats['suspicious']}")
 
     def scan_finished(self, scan_type, total_files):
+        # 사용자가 중지한 경우 완료 메시지 표시하지 않음
+        if self.scan_stopped_by_user:
+            # 스레드 정리만 하고 리턴
+            if self.scan_thread:
+                self.scan_thread = None
+            return
+        
+        # 스레드 정리
+        if self.scan_thread:
+            self.scan_thread.wait()  # 스레드가 완전히 종료될 때까지 대기
+            self.scan_thread = None
+        
         # 진행바 100%로 설정
         self.progress.setValue(self.progress.maximum())
         self.progress_label.setText(f"✅ 검사 완료! (정상: {self.stats.clean_files}, 악성: {self.stats.malicious_files}, 의심: {self.stats.suspicious_files})")
@@ -2143,6 +3256,224 @@ li {{ margin: 5px 0; }}
                     font-weight: bold;
                 }
             """)
+
+    # ========================================================================
+    # 제외 목록 관리 함수들
+    # ========================================================================
+    
+    def load_exclusion_lists(self):
+        """제외 목록을 UI에 로드"""
+        exclusions = SETTINGS.get('exclusions', {'folders': [], 'files': [], 'extensions': [], 'hashes': []})
+        
+        # 폴더 목록
+        self.exclusion_folder_list.clear()
+        for folder in exclusions.get('folders', []):
+            self.exclusion_folder_list.addItem(folder)
+        
+        # 파일 목록
+        self.exclusion_file_list.clear()
+        for file in exclusions.get('files', []):
+            self.exclusion_file_list.addItem(file)
+        
+        # 확장자 목록
+        self.exclusion_ext_list.clear()
+        for ext in exclusions.get('extensions', []):
+            self.exclusion_ext_list.addItem(ext)
+        
+        # 해시 목록
+        self.exclusion_hash_list.clear()
+        for hash_entry in exclusions.get('hashes', []):
+            hash_val = hash_entry.get('hash', '')
+            desc = hash_entry.get('description', '')
+            display = f"{hash_val[:16]}... - {desc}" if desc else hash_val
+            self.exclusion_hash_list.addItem(display)
+    
+    def save_exclusions(self):
+        """제외 목록 저장"""
+        save_settings(SETTINGS)
+    
+    def manual_save_settings(self):
+        """수동 설정 저장 (툴바 버튼용) - 모든 설정 저장"""
+        # 스캔 옵션 저장
+        SETTINGS['scan_options'] = {
+            'detailed_scan': self.detailed_check.isChecked(),
+            'auto_quarantine': self.auto_quarantine_check.isChecked(),
+            'recursive': self.recursive_check.isChecked()
+        }
+        
+        # 다크모드 저장
+        SETTINGS['dark_mode'] = self.dark_mode
+        
+        if save_settings(SETTINGS):
+            QMessageBox.information(self, "저장 완료", f"설정이 저장되었습니다.\n\n저장 위치: {SETTINGS_FILE}")
+        else:
+            QMessageBox.warning(self, "저장 실패", "설정 저장에 실패했습니다.")
+    
+    def load_all_settings(self):
+        """모든 설정 로드"""
+        # 스캔 옵션 로드
+        scan_options = SETTINGS.get('scan_options', {})
+        self.detailed_check.setChecked(scan_options.get('detailed_scan', True))
+        self.auto_quarantine_check.setChecked(scan_options.get('auto_quarantine', False))
+        self.recursive_check.setChecked(scan_options.get('recursive', True))
+    
+    def browse_exclusion_folder(self):
+        """제외 폴더 찾아보기"""
+        folder = QFileDialog.getExistingDirectory(self, "제외할 폴더 선택")
+        if folder:
+            self.exclusion_folder_input.setText(folder)
+    
+    def browse_exclusion_file(self):
+        """제외 파일 찾아보기"""
+        file, _ = QFileDialog.getOpenFileName(self, "제외할 파일 선택")
+        if file:
+            self.exclusion_file_input.setText(file)
+    
+    def add_exclusion_folder(self):
+        """폴더 제외 추가"""
+        folder = self.exclusion_folder_input.text().strip()
+        if not folder:
+            QMessageBox.warning(self, "경고", "폴더 경로를 입력하세요.")
+            return
+        
+        if 'exclusions' not in SETTINGS:
+            SETTINGS['exclusions'] = {'folders': [], 'files': [], 'extensions': [], 'hashes': []}
+        
+        if folder not in SETTINGS['exclusions']['folders']:
+            SETTINGS['exclusions']['folders'].append(folder)
+            self.exclusion_folder_list.addItem(folder)
+            self.save_exclusions()
+            self.exclusion_folder_input.clear()
+            QMessageBox.information(self, "성공", f"폴더가 제외 목록에 추가되었습니다:\n{folder}")
+        else:
+            QMessageBox.warning(self, "경고", "이미 제외 목록에 있는 폴더입니다.")
+    
+    def add_exclusion_file(self):
+        """파일 제외 추가"""
+        file = self.exclusion_file_input.text().strip()
+        if not file:
+            QMessageBox.warning(self, "경고", "파일 경로를 입력하세요.")
+            return
+        
+        if 'exclusions' not in SETTINGS:
+            SETTINGS['exclusions'] = {'folders': [], 'files': [], 'extensions': [], 'hashes': []}
+        
+        if file not in SETTINGS['exclusions']['files']:
+            SETTINGS['exclusions']['files'].append(file)
+            self.exclusion_file_list.addItem(file)
+            self.save_exclusions()
+            self.exclusion_file_input.clear()
+            QMessageBox.information(self, "성공", f"파일이 제외 목록에 추가되었습니다:\n{file}")
+        else:
+            QMessageBox.warning(self, "경고", "이미 제외 목록에 있는 파일입니다.")
+    
+    def add_exclusion_extension(self):
+        """확장자 제외 추가"""
+        ext = self.exclusion_ext_input.text().strip()
+        if not ext:
+            QMessageBox.warning(self, "경고", "확장자를 입력하세요.")
+            return
+        
+        # 점이 없으면 추가
+        if not ext.startswith('.'):
+            ext = '.' + ext
+        
+        if 'exclusions' not in SETTINGS:
+            SETTINGS['exclusions'] = {'folders': [], 'files': [], 'extensions': [], 'hashes': []}
+        
+        if ext.lower() not in [e.lower() for e in SETTINGS['exclusions']['extensions']]:
+            SETTINGS['exclusions']['extensions'].append(ext)
+            self.exclusion_ext_list.addItem(ext)
+            self.save_exclusions()
+            self.exclusion_ext_input.clear()
+            QMessageBox.information(self, "성공", f"확장자가 제외 목록에 추가되었습니다: {ext}")
+        else:
+            QMessageBox.warning(self, "경고", "이미 제외 목록에 있는 확장자입니다.")
+    
+    def add_exclusion_hash(self):
+        """해시 제외 추가"""
+        hash_val = self.exclusion_hash_input.text().strip().lower()
+        desc = self.exclusion_hash_desc.text().strip()
+        
+        if not hash_val:
+            QMessageBox.warning(self, "경고", "해시값을 입력하세요.")
+            return
+        
+        # 해시 길이 검증
+        if len(hash_val) != 32 and len(hash_val) != 64:
+            QMessageBox.warning(self, "경고", "MD5(32자) 또는 SHA256(64자) 해시를 입력하세요.")
+            return
+        
+        if 'exclusions' not in SETTINGS:
+            SETTINGS['exclusions'] = {'folders': [], 'files': [], 'extensions': [], 'hashes': []}
+        
+        # 중복 확인
+        existing_hashes = [h.get('hash', '').lower() for h in SETTINGS['exclusions']['hashes']]
+        if hash_val not in existing_hashes:
+            hash_entry = {'hash': hash_val, 'description': desc}
+            SETTINGS['exclusions']['hashes'].append(hash_entry)
+            display = f"{hash_val[:16]}... - {desc}" if desc else hash_val
+            self.exclusion_hash_list.addItem(display)
+            self.save_exclusions()
+            self.exclusion_hash_input.clear()
+            self.exclusion_hash_desc.clear()
+            QMessageBox.information(self, "성공", f"해시가 제외 목록에 추가되었습니다:\n{hash_val[:32]}...")
+        else:
+            QMessageBox.warning(self, "경고", "이미 제외 목록에 있는 해시입니다.")
+    
+    def remove_exclusion_item(self, exclusion_type):
+        """제외 항목 삭제"""
+        if exclusion_type == 'folders':
+            list_widget = self.exclusion_folder_list
+            settings_key = 'folders'
+        elif exclusion_type == 'files':
+            list_widget = self.exclusion_file_list
+            settings_key = 'files'
+        elif exclusion_type == 'extensions':
+            list_widget = self.exclusion_ext_list
+            settings_key = 'extensions'
+        elif exclusion_type == 'hashes':
+            list_widget = self.exclusion_hash_list
+            settings_key = 'hashes'
+        else:
+            return
+        
+        current_item = list_widget.currentItem()
+        if not current_item:
+            QMessageBox.warning(self, "경고", "삭제할 항목을 선택하세요.")
+            return
+        
+        current_row = list_widget.currentRow()
+        
+        if settings_key == 'hashes':
+            # 해시는 인덱스로 삭제
+            if current_row < len(SETTINGS['exclusions']['hashes']):
+                del SETTINGS['exclusions']['hashes'][current_row]
+        else:
+            # 다른 항목은 값으로 삭제
+            value = current_item.text()
+            if value in SETTINGS['exclusions'][settings_key]:
+                SETTINGS['exclusions'][settings_key].remove(value)
+        
+        list_widget.takeItem(current_row)
+        self.save_exclusions()
+        QMessageBox.information(self, "성공", "항목이 제외 목록에서 삭제되었습니다.")
+    
+    def clear_all_exclusions(self):
+        """모든 제외 목록 삭제"""
+        reply = QMessageBox.question(self, '확인', 
+                                     '모든 제외 목록을 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.',
+                                     QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            SETTINGS['exclusions'] = {
+                'folders': [],
+                'files': [],
+                'extensions': [],
+                'hashes': []
+            }
+            self.save_exclusions()
+            self.load_exclusion_lists()
+            QMessageBox.information(self, "성공", "모든 제외 목록이 삭제되었습니다.")
 
 
 if __name__ == "__main__":
