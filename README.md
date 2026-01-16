@@ -1,4 +1,4 @@
-# 🛡️ InfraRed - Python + C++ Hybrid Antivirus
+# 🛡️ InfraRed
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.8+-blue.svg" alt="Python">
