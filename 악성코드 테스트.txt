@@ -1,0 +1,88 @@
+"""
+테스트용 바이러스 파일 생성 스크립트
+실제 악성코드가 아닌 탐지 테스트용 파일입니다.
+"""
+
+import os
+
+test_dir = os.path.dirname(__file__)
+
+print("=" * 60)
+print("테스트용 바이러스 파일 생성 중...")
+print("=" * 60)
+
+print("\n[1/6] 시그니처 탐지 테스트 파일 생성...")
+with open(os.path.join(test_dir, "test_malware_signature.txt"), "w", encoding='utf-8') as f:
+    f.write("=== 시그니처 탐지 테스트 파일 ===\n\n")
+    f.write("이 파일은 악성 시그니처를 포함하고 있습니다.\n\n")
+    f.write("malware detected here\n")
+    f.write("virus signature present\n")
+    f.write("trojan code sample\n")
+print("✓ test_malware_signature.txt 생성 완료")
+
+print("\n[2/6] MD5 해시 탐지 테스트 파일 생성...")
+with open(os.path.join(test_dir, "test_hash_md5.txt"), "w", encoding='utf-8') as f:
+    f.write("test")  # MD5: 098f6bcd4621d373cade4e832627b4f6
+print("✓ test_hash_md5.txt 생성 완료 (MD5: 098f6bcd4621d373cade4e832627b4f6)")
+
+print("\n[3/6] 휴리스틱 탐지 테스트 파일 (랜섬웨어)...")
+with open(os.path.join(test_dir, "test_ransomware_behavior.txt"), "w", encoding='utf-8') as f:
+    f.write("=== 랜섬웨어 행위 시뮬레이션 ===\n\n")
+    f.write("This file simulates ransomware behavior\n\n")
+    f.write("encrypt all your files\n")
+    f.write("send bitcoin payment to decrypt\n")
+    f.write("your files are locked\n")
+    f.write("payment required for decrypt key\n")
+print("✓ test_ransomware_behavior.txt 생성 완료")
+
+print("\n[4/6] 휴리스틱 탐지 테스트 파일 (백도어)...")
+with open(os.path.join(test_dir, "test_backdoor_behavior.txt"), "w", encoding='utf-8') as f:
+    f.write("=== 백도어 행위 시뮬레이션 ===\n\n")
+    f.write("This file simulates backdoor behavior\n\n")
+    f.write("socket connection established\n")
+    f.write("connect to remote server\n")
+    f.write("recv data from command center\n")
+    f.write("send stolen data\n")
+    f.write("execute cmd.exe commands\n")
+print("✓ test_backdoor_behavior.txt 생성 완료")
+
+print("\n[5/6] 한글 파일명 테스트 파일 생성...")
+with open(os.path.join(test_dir, "테스트_악성파일.txt"), "w", encoding='utf-8') as f:
+    f.write("=== 한글 파일명 테스트 ===\n\n")
+    f.write("이 파일은 한글 파일명과 악성 시그니처를 포함합니다.\n\n")
+    f.write("malware virus trojan backdoor\n")
+    f.write("악성코드 테스트 파일입니다.\n")
+print("✓ 테스트_악성파일.txt 생성 완료")
+
+print("\n[6/6] 정상 파일 생성...")
+with open(os.path.join(test_dir, "clean_file.txt"), "w", encoding='utf-8') as f:
+    f.write("=== 정상 파일 ===\n\n")
+    f.write("This is a clean file.\n")
+    f.write("No malicious content here.\n")
+    f.write("Safe to use.\n")
+    f.write("정상적인 파일입니다.\n")
+print("✓ clean_file.txt 생성 완료")
+
+print("\n" + "=" * 60)
+print("✅ 모든 테스트 파일 생성 완료!")
+print("=" * 60)
+
+print("\n📁 생성된 파일 목록:")
+print("  1. test_malware_signature.txt    - 시그니처 탐지 (악성)")
+print("  2. test_hash_md5.txt             - MD5 해시 탐지 (악성)")
+print("  3. test_ransomware_behavior.txt  - 휴리스틱 탐지 (의심)")
+print("  4. test_backdoor_behavior.txt    - 휴리스틱 탐지 (의심)")
+print("  5. 테스트_악성파일.txt            - 한글 파일명 + 악성")
+print("  6. clean_file.txt                - 정상 파일")
+
+print(f"\n📂 위치: {test_dir}")
+
+print("\n🔍 테스트 방법:")
+print("  1. 고급 백신 GUI를 실행하세요")
+print("  2. '파일 선택' 또는 '폴더 검사'로 이 폴더를 스캔하세요")
+print("  3. 탐지 결과를 확인하세요:")
+print("     - 🔴 악성: test_malware_signature.txt, test_hash_md5.txt, 테스트_악성파일.txt")
+print("     - ⚠️ 의심: test_ransomware_behavior.txt, test_backdoor_behavior.txt")
+print("     - ✅ 정상: clean_file.txt")
+print("  4. 격리 기능을 테스트하세요")
+print("  5. 복원 기능을 테스트하세요")
