@@ -73,7 +73,7 @@ InfraRed/
 │   ├── requirements.txt        # Python 의존성
 │   └── quarantine/             # 격리 폴더
 ├── test_files/
-│   └── create_test_virus_files.py
+│   └── 악성코드 테스트.txt
 └── README.md
 ```
 
