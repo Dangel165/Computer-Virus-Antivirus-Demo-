@@ -66,7 +66,6 @@
 InfraRed/
 ├── cpp_engine/
 │   ├── antivirus_core.cpp      # C++ 탐지 엔진 소스
-│   └── CMakeLists.txt
 ├── python_gui/
 │   ├── antivirus.py            # 메인 GUI 애플리케이션
 │   ├── requirements.txt        # Python 의존성
